@@ -2,7 +2,7 @@
 
   This program interfaces an ESP32 with the FDC1004 capacitive sensor to perform
   high-resolution capacitance measurements. It uses a hardware timer to trigger
-  data acquisition at fixed intervals (5 ms), collects a specified number of
+  data acquisition at fixed intervals (12.5 ms), collects a specified number of
   samples, and sends them over the serial port. The system supports runtime
   configuration of the CAPDAC value and sample count via serial commands.
 
