@@ -71,7 +71,7 @@ deactivate
    ```
 
 4. **Output**  
-   - Data is saved in the `Force Data/` folder as a CSV file.
+   - Data is saved in the `Capacitance Data/` folder as a CSV file.
    - The CSV includes metadata, timestamps, and capacitance values.
 
 ---
