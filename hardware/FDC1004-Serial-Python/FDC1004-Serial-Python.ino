@@ -36,7 +36,7 @@
 // Defines
 // -----------------------------------------------------------------------------------------------------------
 #define TIMER_DIVIDER 80  //  Hardware timer clock divider, use 80 to divide the ESP32 80 MHz clock frequency down to 1 MHz resolution
-#define TIMER_INTERVAL 5000 // Based on the TIMER_DIVIDER 1 is equivalent to 1 microsecond, so 5000 is equal to 5 ms (we will interrupt every 5 ms) 
+#define TIMER_INTERVAL 12500 // Based on the TIMER_DIVIDER 1 is equivalent to 1 microsecond, so 12500 is equal to 12.5 ms (we will interrupt every 12.5 ms (80 Hz)) 
 
 // -----------------------------------------------------------------------------------------------------------
 // Declare/Initialize Variables
@@ -53,7 +53,7 @@ const char *pcStringToSend = "O";
 //settings to configure measurement channel
 uint8_t measurement = 1;    //must be 1,2,3,or 4
 uint8_t sensor = 1;         //must be 1,2,3,or 4
-uint8_t rate = 4;           //1 = 100 Hz, 2 = 200 Hz, 3 = 400 Hz
+uint8_t rate = 1;           //1 = 100 Hz, 2 = 200 Hz, 3 = 400 Hz Lower sample rate the higher the resolution
 
 // -----------------------------------------------------------------------------------------------------------
 // Data Struct

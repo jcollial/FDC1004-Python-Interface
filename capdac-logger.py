@@ -23,7 +23,7 @@ DataFileName = "myFile"
 # --------------------------------------------------------------------------------------------------------------------
 # Private Constants
 # --------------------------------------------------------------------------------------------------------------------
-_CAP_SENSOR_SAMPLING_RATE = 200  # in Hz
+_CAP_SENSOR_SAMPLING_RATE = 80  # in Hz (this must match the TIME_INTERVAL variable in the ESP32 code)
 
 
 # --------------------------------------------------------------------------------------------------------------------
@@ -146,45 +146,47 @@ def build_data_headers(headers: dict, custom_metadata: dict = None) -> dict:
 
 
 if __name__ == "__main__":
-    # Calculate number of samples to read from ESP32
+    # Calculate the total number of samples to acquire from the ESP32
     sampsToGet = int(_CAP_SENSOR_SAMPLING_RATE * DATA_ACQUISITION_DURATION)
 
-    # Each sample from ESP32 is 8 bytes (4 bytes timestamp + 2 bytes cap sensor + 2 bytes padding or unused)
+    # Each sample from the ESP32 consists of 8 bytes:
+    # 4 bytes for timestamp and 4 bytes for capacitive sensor data
     nBytes_to_receive = 8
 
-    # Open serial communication
-    try:  # Try lets a block of code be tested for errors
-        # When a port is given, the serial communication starts automatically
-        # otherwhise we have to call serial.Open()
+    # Initialize serial communication with the ESP32
+    try:
+        # If a port is specified, the serial connection opens automatically
         serialPort = serial.Serial(port, baudrate=baudRate_serial, timeout=timeout_serial)
     except serial.SerialException:
         print("\nError (Serial Communication): Check the communication port \n")
-        sys.exit(1)  # stop program execution if error found
+        sys.exit(1)  # Exit the program if the serial connection fails
 
+    # Clear any existing data in the input buffer
     serialPort.reset_input_buffer()
 
-    # Set CAPDAC value
+    # Ensure CAPDAC value is within the valid range [0, 31]
     CAPDAC = max(0, min(31, CAPDAC))
 
+    # Send CAPDAC configuration to the ESP32
     getDevAck(serialPort, CAPDAC, 0)
 
-    # Send number of samples to get to the ESP32
+    # Send the number of samples to acquire to the ESP32
     getDevAck(serialPort, sampsToGet, 1)
 
-    # Send start signal to ESP32
+    # Send the start signal to begin data acquisition
     getDevAck(serialPort, "S", 2)
 
-    # Read the incoming serial data
+    # Read the expected number of bytes from the serial port
     serialData = enhancedReadSerial(serialPort, sampsToGet * nBytes_to_receive)
 
-    # Check if data received matches expected size
+    # Verify that the received data size matches the expected number of samples
     (
         print(f"Total data received is: {len(serialData)//nBytes_to_receive}")
         if len(serialData) % nBytes_to_receive == 0
         else print(f"Possible data loss. Total data received is: {len(serialData)/nBytes_to_receive}")
     )
 
-    # Split data into timestamp and cap sensor parts
+    # Split the raw data into timestamp and capacitive sensor byte pairs
     pairs = [(elements[:4], elements[4:]) for elements in [serialData[ii : ii + nBytes_to_receive] for ii in range(0, len(serialData), nBytes_to_receive)]]
 
     esp32_timestamp_bytes = []
@@ -194,56 +196,59 @@ if __name__ == "__main__":
         esp32_timestamp_bytes.append(x)
         cap_sensor_bytes.append(y)
 
-    # Convert Cap sensor bytes to capacitance values (from page 16 on FDC1004 datasheet). Use little as byteorder as the ESP32 sends byte in little endian
+    # Convert capacitive sensor bytes to capacitance values (in pF)
+    # Formula from FDC1004 datasheet (page 16), using little-endian byte order as that is the format from the ESP32
     capData = [round(((int.from_bytes(bytes_data, byteorder="little", signed=True) / 524288.0) + (CAPDAC * 3.125)), 4) for bytes_data in cap_sensor_bytes]
 
-    # Convert timestamp bytes to integers
+    # Convert timestamp bytes to relative time (in microseconds)
     _esp32_timestamp = [int.from_bytes(bytes_data, byteorder="little") for bytes_data in esp32_timestamp_bytes]
     esp32_timestamp = [x - _esp32_timestamp[0] for x in _esp32_timestamp]
 
+    # Close the serial port after data acquisition
     serialPort.close()
 
     # ------------------------------------------------------------------------------------------------------------------
     print(f"\nSaving data, please wait...")
 
-    # Check if Force Data folder exists. If it does not, then create the folder to store data
-    dataFolderNamePath = pathlib.Path(__file__).parent.joinpath("Force Data")
+    # Create the output folder if it doesn't exist
+    dataFolderNamePath = pathlib.Path(__file__).parent.joinpath("Capacitance Data")
     if not dataFolderNamePath.is_dir():
         dataFolderNamePath.mkdir()
 
+    # Generate sample numbers for each data point
     cap_data_num_samples = list(range(1, len(esp32_timestamp) + 1))
 
+    # Define column headers for the CSV file
     _dataHeaders = {
         "A": "Sample No.",
         "B": "Timestamp (us)",
         "C": "Capacitance (pF)",
     }
 
-    # Metadata
+    # Define metadata to include at the top of the CSV file
     dataMetadata = {
         "A": ["Data Collection Duration (s):", "Capacitive Sensor Sample rate (Hz):"],
         "B": [DATA_ACQUISITION_DURATION, _CAP_SENSOR_SAMPLING_RATE],
     }
 
-    # Data content
+    # Organize the main data content
     dataBody = {
         "A": cap_data_num_samples,
         "B": esp32_timestamp,
         "C": capData,
-        # Add more columns here as needed
     }
 
+    # Build the full header section with metadata
     dataHeaders = build_data_headers(_dataHeaders, dataMetadata)
 
-    # Create a DataFrame for the headers
+    # Create DataFrames for headers and data
     header_df = pd.DataFrame(dataHeaders)
-
-    # Convert dataBody into a dataframe
     dataBody_df = pd.DataFrame(dataBody)
 
-    # Concatenate the header and data DataFrames
+    # Combine header and data into a single DataFrame
     capacitanceData_df = pd.concat([header_df, dataBody_df], ignore_index=True)
 
+    # Save the DataFrame to a CSV file
     capacitanceData_df.to_csv(
         dataFolderNamePath.joinpath(DataFileName + ".csv"),
         index=False,
