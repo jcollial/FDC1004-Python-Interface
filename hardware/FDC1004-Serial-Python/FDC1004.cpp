@@ -214,7 +214,7 @@ int32_t FDC1004::getRawCapacitance(uint8_t measurement, uint8_t rate)
   }
   else
   {
-    data = rawdata;
+    data = (int32_t)rawdata;
   }
 
   return data;

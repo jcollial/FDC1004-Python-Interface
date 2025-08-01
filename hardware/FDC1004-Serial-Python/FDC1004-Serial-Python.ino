@@ -18,8 +18,8 @@
   - ESP32 timer driver (driver/timer.h)
 
   The source code for the FDC1004.h and the FDC1004.cpp is licensed under
-  the MIT license found in the LICENSE file in the root directory of this
-  source tree.
+  the MIT license found in the LICENSE file in the same directory of this
+  file.
 
   Author: Jose Guillermo Colli Alfaro <jcollial@uwo.ca>
   Affiliation: The Wearable Biomechatronics Laboratory
@@ -75,7 +75,9 @@ FDC1004 myFDC1004;
 // -----------------------------------------------------------------------------------------------------------
 void set_capdac() {
   int timeout = 0;
-  Serial.write(0x00); // Echo configuration command received from serial port
+  uint8_t response[3] = {0x3C, 0x00, 0x3E}; 
+//  Serial.write(0x00); // Echo configuration command received from serial port
+  Serial.write((uint8_t*) &response, sizeof(response));
   while (timeout < 200) {
     if (Serial.available() > 0) {
       capdac = Serial.parseInt();
@@ -95,7 +97,9 @@ void set_capdac() {
 
 void setSamplesToGet() {
   int timeout = 0;
-  Serial.write(0x01); // Echo configuration command received from serial port
+  uint8_t response[3] = {0x3C, 0x01, 0x3E}; 
+//  Serial.write(0x01); // Echo configuration command received from serial port
+  Serial.write((uint8_t*) &response, sizeof(response));
   while (timeout < 200) {
     if (Serial.available() > 0) {
       samplesToGet = Serial.parseInt();
@@ -117,7 +121,9 @@ void setSamplesToGet() {
 void collectData() {
   int timeout = 0;
   uint8_t commandReceived;
-  Serial.write(0x02); // Echo configuration command received from serial port
+  uint8_t response[3] = {0x3C, 0x02, 0x3E}; 
+//  Serial.write(0x02); // Echo configuration command received from serial port
+  Serial.write((uint8_t*) &response, sizeof(response));
   while (timeout < 200) {
     if (Serial.available() > 0) {
       commandReceived = Serial.read();
@@ -143,6 +149,7 @@ void collectData() {
 
       dataCAP.cap_sens_timestamp = (uint32_t)esp_timer_get_time();
       dataCAP.cap_sens_data = myFDC1004.getRawCapacitance(measurement, rate);
+//      dataCAP.cap_sens_data = (uint32_t)esp_timer_get_time();
       Serial.write((uint8_t*) &dataCAP, sizeof(dataCAP));
       samplesSent++;
 
@@ -194,15 +201,10 @@ void setup() {
   
   // Initialize Serial Port 0 (used to send data through serial port)
   Serial.begin(115200);
+  Serial.println("ESP32 ready");
 
   // Initialize the ESP32 Timer
   tg_timer_init(TIMER_GROUP_0, TIMER_0, TIMER_AUTORELOAD_EN, TIMER_INTERVAL);
-
-  //set up one measurement channel to measure channel A (CHA)
-  //measurement channels hold the settings for what you want to measure
-  //channels are the physical pins for measurement on the chip/board
-  //read more about it here: 
-  myFDC1004.setupSingleMeasurement(measurement, sensor, capdac);
 }
 
 // Void loop is attached to core 1 by default
@@ -213,6 +215,11 @@ void loop() {
 
   if (pcCommand == 0x00) {
     set_capdac();
+    //set up one measurement channel to measure channel A (CHA)
+    //measurement channels hold the settings for what you want to measure
+    //channels are the physical pins for measurement on the chip/board
+    //read more about it here: 
+    myFDC1004.setupSingleMeasurement(measurement, sensor, capdac);
     pcCommand = -1;
   }
   else if (pcCommand == 0x01) {
