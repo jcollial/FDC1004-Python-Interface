@@ -25,7 +25,7 @@
   Affiliation: The Wearable Biomechatronics Laboratory
   Version: 1.0
   Date: July 31, 2025
-  
+
 */
 
 #include <Wire.h>
@@ -36,12 +36,29 @@
 // Defines
 // -----------------------------------------------------------------------------------------------------------
 #define TIMER_DIVIDER 80  //  Hardware timer clock divider, use 80 to divide the ESP32 80 MHz clock frequency down to 1 MHz resolution
-#define TIMER_INTERVAL 12500 // Based on the TIMER_DIVIDER 1 is equivalent to 1 microsecond, so 12500 is equal to 12.5 ms (we will interrupt every 12.5 ms (80 Hz)) 
+#define TIMER_INTERVAL 12500 // Based on the TIMER_DIVIDER 1 is equivalent to 1 microsecond, so 12500 is equal to 12.5 ms (we will interrupt every 12.5 ms (80 Hz))
+#define TIMEOUT_MS 13 // used during dataCollect() to estimate timeout
+#define LED 2
 
 // -----------------------------------------------------------------------------------------------------------
 // Declare/Initialize Variables
 // -----------------------------------------------------------------------------------------------------------
+const uint8_t numChars = 32;
+char receivedChars[numChars];
+char tempChars[numChars];        // temporary array for use when parsing
+
+
+unsigned long startTime;
+unsigned long timeout = 5000; // 5 second
+
+// variables to hold the parsed data
+int8_t cmd = -1;
+uint32_t cmd_value = 0;
+boolean newData = false;
+char pcAck = 'F';
+
 // Set constants
+int samplesSent = 0;
 volatile int samplesToGet = 100;
 volatile int capdac = 0;
 volatile bool timer_interruptFlag = false;
@@ -70,53 +87,117 @@ FDC1004 myFDC1004;
 // State Machine
 // -----------------------------------------------------------------------------------------------------------
 enum State {
-  WAIT_FOR_COMMAND,
-  CONFIG_CAPDAC,
-  CONFIG_SAMPLES,
-  WAIT_FOR_START_SIGNAL,
+  WAIT_FOR_SERIAL, // Wait for ESP32 to be ready to accept serial commands
+  WAIT_FOR_COMMAND, // Wait for PC command
   COLLECT_DATA
 };
 
-State currentState = WAIT_FOR_COMMAND;
+State currentState = WAIT_FOR_SERIAL;
 
 // -----------------------------------------------------------------------------------------------------------
-// Helpers
+// Serial functions
 // -----------------------------------------------------------------------------------------------------------
-int readCommandFromSerial() {
-  unsigned long startTime = millis();
-  while (millis() - startTime < 2000) {
-    if (Serial.available() >= 3) {
-      char start = Serial.read();
-      char cmd   = Serial.read();
-      char end   = Serial.read();
-      if (start == '<' && end == '>') {
-        return (int)cmd;
+void recvWithStartEndMarkers() {
+  static boolean recvInProgress = false;
+  static uint8_t ndx = 0;
+  char startMarker = '<';
+  char endMarker = '>';
+  char rc;
+
+  timeout = 5000;
+  while (Serial.available() > 0 && newData == false) {
+    rc = Serial.read();
+
+    if (recvInProgress == true) {
+      if (millis() - startTime > timeout) {
+        resetBuffer(ndx, recvInProgress, receivedChars); // Timeout
+        Serial.print("F");
+      }
+
+      if (rc != endMarker) {
+        receivedChars[ndx] = rc;
+        ndx++;
+        if (ndx >= numChars) {
+          ndx = numChars - 1;
+        }
+      }
+      else {
+        resetBuffer(ndx, recvInProgress, receivedChars);
+        newData = true;
       }
     }
-  }
-  return -1;
-}
 
-int readIntFromSerial() {
-  String input = "";
-  bool started = false;
-  unsigned long startTime = millis();
-  while (millis() - startTime < 2000) {
-    if (Serial.available()) {
-      char c = Serial.read();
-      if (c == '<') {
-        started = true;
-        input = "";
-      } else if (c == '>' && started) {
-        return input.toInt();
-      } else if (started) {
-        input += c;
-      }
+    else if (rc == startMarker) {
+      recvInProgress = true;
+      startTime = millis(); // Start timeout timer
     }
   }
-  return -1;
 }
 
+void resetBuffer(uint8_t &ndx, bool &recvInProgress, char *buffer) {
+  buffer[ndx] = '\0';
+  ndx = 0;
+  recvInProgress = false;
+}
+
+void readCommandFromSerial() {
+  recvWithStartEndMarkers();
+  if (newData == true) {
+    strcpy(tempChars, receivedChars); // Copy contents of receivedChars into tempChars as strtok in parseData() modifies the original array
+    parseData();
+    newData = false;
+  }
+}
+
+void parseData() {      // split the data into its parts
+  char * strtokIndx; // this is used by strtok() as an index
+
+  //  Serial.print(tempChars); // FOR DEBUG
+  strtokIndx = strtok(tempChars, ",");     // get the first part - the string
+  cmd = atoi(strtokIndx); // copy it to cmd
+
+  strtokIndx = strtok(NULL, ","); // this continues where the previous call left off
+  if (strtokIndx != NULL) {
+    cmd_value = atoi(strtokIndx);     // copy it to cmd_value
+  }
+}
+
+void collectData() {
+  timer_start(TIMER_GROUP_0, TIMER_0);
+  timeout = samplesToGet * 2 * TIMEOUT_MS; // Wait twice the number of samples to get
+  startTime = millis(); // Start timeout timer
+  while (samplesSent < samplesToGet) {
+    if (millis() - startTime > timeout) {
+      // Send end marker maybe?
+      break;
+    }
+
+    if (timer_interruptFlag) {
+      timer_interruptFlag = false;
+      dataCAP.cap_sens_timestamp = (uint32_t)esp_timer_get_time();
+      dataCAP.cap_sens_data = myFDC1004.getRawCapacitance(measurement, rate);
+      Serial.write((uint8_t*)&dataCAP, sizeof(dataCAP));
+      samplesSent++;
+    }
+  }
+  resetTimer();
+  samplesSent = 0;
+}
+
+void sendESP32Rdy() {
+  Serial.print("<ESP32 Ready>");
+  if (Serial.available() > 0) {
+    pcAck = Serial.read();
+  }
+  if (pcAck == 'O') {
+    currentState = WAIT_FOR_COMMAND;
+    pcAck = 'F';
+  }
+}
+
+// -----------------------------------------------------------------------------------------------------------
+// Timer functions
+// -----------------------------------------------------------------------------------------------------------
 void resetTimer() {
   timer_pause(TIMER_GROUP_0, TIMER_0);
   timer_set_counter_value(TIMER_GROUP_0, TIMER_0, 0);
@@ -142,99 +223,108 @@ static void tg_timer_init(timer_group_t group, timer_idx_t timer, timer_autorelo
   timer_isr_callback_add(group, timer, timer_group_isr_callback, NULL, 0);
 }
 
+void send_echo_command(int echo_cmd) {
+  uint8_t response[3] = {0x3C, echo_cmd, 0x3E};
+  Serial.write((uint8_t*) &response, sizeof(response));
+  return;
+}
+
+
 // -----------------------------------------------------------------------------------------------------------
 // Setup and Loop
 // -----------------------------------------------------------------------------------------------------------
 void setup() {
   Wire.begin();
   Serial.begin(115200);
-  Serial.println("ESP32 ready");
   tg_timer_init(TIMER_GROUP_0, TIMER_0, TIMER_AUTORELOAD_EN, TIMER_INTERVAL);
+  // Set LED pin mode
+  pinMode(LED, OUTPUT);
+  digitalWrite(LED, LOW);
 }
 
 void loop() {
   switch (currentState) {
-    case WAIT_FOR_COMMAND: {
-      int cmd = readCommandFromSerial();
-      if (cmd != -1) {
-        switch (cmd) {
-          case 0x00:
-            currentState = CONFIG_CAPDAC;
-            break;
-          case 0x01:
-            currentState = CONFIG_SAMPLES;
-            break;
-          case 0x02:
-            currentState = WAIT_FOR_START_SIGNAL;
-            break;
+    case WAIT_FOR_SERIAL: {
+        Serial.print("<ESP32 Ready>");
+        if (Serial.available() > 0) {
+          pcAck = Serial.read();
         }
+        if (pcAck == 'O') {
+          currentState = WAIT_FOR_COMMAND;
+          pcAck = 'F';
+        }
+        break;
       }
-      break;
-    }
-
-    case CONFIG_CAPDAC: {
-      int value = readIntFromSerial();
-      if (value != -1) {
-        capdac = value;
-        myFDC1004.setupSingleMeasurement(measurement, sensor, capdac);
-        Serial.print("O");
-      } else {
-        Serial.print("F");
-      }
-      currentState = WAIT_FOR_COMMAND;
-      break;
-    }
-
-    case CONFIG_SAMPLES: {
-      int value = readIntFromSerial();
-      if (value != -1) {
-        samplesToGet = value;
-        Serial.print("O");
-      } else {
-        Serial.print("F");
-      }
-      currentState = WAIT_FOR_COMMAND;
-      break;
-    }
-
-    case WAIT_FOR_START_SIGNAL: {
-      unsigned long startTime = millis();
-      bool startReceived = false;
-      while (millis() - startTime < 2000) {
-        if (Serial.available()) {
-          char c = Serial.read();
-          if (c == 'S') {
-            startReceived = true;
-            break;
+    case WAIT_FOR_COMMAND: {
+        if (Serial.available() > 0) {
+          readCommandFromSerial();
+        }
+        if (cmd != -1) {
+          switch (cmd) {
+            case 0x00:
+              capdac = cmd_value;
+              myFDC1004.setupSingleMeasurement(measurement, sensor, capdac);
+              Serial.print("<");
+              Serial.print(capdac);
+              Serial.print(">");
+              cmd = -1;
+              break;
+            case 0x01:
+              samplesToGet = cmd_value;
+              Serial.print("<");
+              Serial.print(samplesToGet);
+              Serial.print(">");
+              cmd = -1;
+              break;
+            case 0x02:
+              collectData();
+              cmd = -1;
+              break;
+            case 0x03:
+              cmd = -1;
+              currentState = WAIT_FOR_SERIAL;
           }
         }
+        break;
       }
-      if (startReceived) {
-        Serial.print("O");
-        currentState = COLLECT_DATA;
-      } else {
-        Serial.print("F");
-        currentState = WAIT_FOR_COMMAND;
-      }
-      break;
-    }
+
+    //    case WAIT_FOR_START_SIGNAL: {
+    //        unsigned long startTime = millis();
+    //        bool startReceived = false;
+    //        while (millis() - startTime < 2000) {
+    //          if (Serial.available()) {
+    //            char c = Serial.read();
+    //            if (c == 'S') {
+    //              startReceived = true;
+    //              break;
+    //            }
+    //          }
+    //        }
+    //        if (startReceived) {
+    //          Serial.print("O");
+    //          currentState = COLLECT_DATA;
+    //        } else {
+    //          Serial.print("F");
+    //          currentState = WAIT_FOR_COMMAND;
+    //        }
+    //        break;
+    //      }
 
     case COLLECT_DATA: {
-      timer_start(TIMER_GROUP_0, TIMER_0);
-      while (samplesSent < samplesToGet) {
-        if (timer_interruptFlag) {
-          timer_interruptFlag = false;
-          dataCAP.cap_sens_timestamp = (uint32_t)esp_timer_get_time();
-          dataCAP.cap_sens_data = myFDC1004.getRawCapacitance(measurement, rate);
-          Serial.write((uint8_t*)&dataCAP, sizeof(dataCAP));
-          samplesSent++;
+        timer_start(TIMER_GROUP_0, TIMER_0);
+        while (samplesSent < samplesToGet) {
+          if (timer_interruptFlag) {
+            timer_interruptFlag = false;
+            dataCAP.cap_sens_timestamp = (uint32_t)esp_timer_get_time();
+            dataCAP.cap_sens_data = myFDC1004.getRawCapacitance(measurement, rate);
+            Serial.write((uint8_t*)&dataCAP, sizeof(dataCAP));
+            samplesSent++;
+          }
         }
+        resetTimer();
+        samplesSent = 0;
+        currentState = WAIT_FOR_COMMAND;
+        break;
       }
-      resetTimer();
-      samplesSent = 0;
-      currentState = WAIT_FOR_COMMAND;
-      break;
-    }
   }
 }
-
