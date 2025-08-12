@@ -23,8 +23,8 @@
 
   Author: Jose Guillermo Colli Alfaro <jcollial@uwo.ca>
   Affiliation: The Wearable Biomechatronics Laboratory
-  Version: 1.0
-  Date: July 31, 2025
+  Version: 2.0
+  Date: August 5, 2025
 
 */
 
@@ -245,14 +245,7 @@ void setup() {
 void loop() {
   switch (currentState) {
     case WAIT_FOR_SERIAL: {
-        Serial.print("<ESP32 Ready>");
-        if (Serial.available() > 0) {
-          pcAck = Serial.read();
-        }
-        if (pcAck == 'O') {
-          currentState = WAIT_FOR_COMMAND;
-          pcAck = 'F';
-        }
+        sendESP32Rdy();
         break;
       }
     case WAIT_FOR_COMMAND: {
@@ -285,45 +278,6 @@ void loop() {
               currentState = WAIT_FOR_SERIAL;
           }
         }
-        break;
-      }
-
-    //    case WAIT_FOR_START_SIGNAL: {
-    //        unsigned long startTime = millis();
-    //        bool startReceived = false;
-    //        while (millis() - startTime < 2000) {
-    //          if (Serial.available()) {
-    //            char c = Serial.read();
-    //            if (c == 'S') {
-    //              startReceived = true;
-    //              break;
-    //            }
-    //          }
-    //        }
-    //        if (startReceived) {
-    //          Serial.print("O");
-    //          currentState = COLLECT_DATA;
-    //        } else {
-    //          Serial.print("F");
-    //          currentState = WAIT_FOR_COMMAND;
-    //        }
-    //        break;
-    //      }
-
-    case COLLECT_DATA: {
-        timer_start(TIMER_GROUP_0, TIMER_0);
-        while (samplesSent < samplesToGet) {
-          if (timer_interruptFlag) {
-            timer_interruptFlag = false;
-            dataCAP.cap_sens_timestamp = (uint32_t)esp_timer_get_time();
-            dataCAP.cap_sens_data = myFDC1004.getRawCapacitance(measurement, rate);
-            Serial.write((uint8_t*)&dataCAP, sizeof(dataCAP));
-            samplesSent++;
-          }
-        }
-        resetTimer();
-        samplesSent = 0;
-        currentState = WAIT_FOR_COMMAND;
         break;
       }
   }
