@@ -60,119 +60,101 @@ def enhancedReadSerial(serialPort: serial, nBytes, timeout=40):
             return buf
 
 
-# def _getDevAck(serialPort: serial, comm2send, comm2rec, timeout=40):
-#     """
-#     Sends a command to the ESP32 and waits for acknowledgment.
-
-#     Args:
-#         serialPort: The serial port object.
-#         comm2send: The command to send (string or convertible to string).
-#         comm2rec: The expected acknowledgment byte.
-#         timeout: Number of attempts before timing out.
-#     """
-#     if not isinstance(comm2send, str):
-#         comm2send = str(comm2send)
-
-#     esp32Timeout = 0  # Counter for timeout attempts
-
-#     # Send the expected acknowledgment code to ESP32
-#     serialPort.write(comm2rec.to_bytes(1, "big"))
-
-#     # Wait for the correct acknowledgment byte
-#     while esp32Timeout <= 20:
-#         if serialPort.in_waiting > 0:
-#             x = serialPort.read()
-#             print(x)
-#             if int.from_bytes(x, "big") == comm2rec:
-#                 esp32Timeout = 0
-#                 break
-#             else:
-#                 print("\nError (ESP32 Communication): Failed to receive correct command from the device \n")
-#                 sys.exit(1)  # stop program execution if error found
-
-#         esp32Timeout += 1
-#         if esp32Timeout == timeout:
-#             print("\nError (ESP32 Communication): Timeout when communicating with the device \n")
-#             sys.exit(1)  # stop program execution if error found
-#         time.sleep(0.5)
-
-#     # Send the actual command to ESP32
-#     serialPort.write(comm2send.encode("utf-8"))
-
-#     # Wait for 'O' (OK) response from ESP32
-#     while esp32Timeout <= 20:
-#         if serialPort.in_waiting > 0:
-#             x = serialPort.read().decode("utf-8")
-#             if x == "O":
-#                 esp32Timeout = 0
-#                 break
-#             else:
-#                 print("\nError (ESP32 Communication): Failed to receive 'O' command from the device \n")
-#                 sys.exit(1)  # stop program execution if error found
-
-#         esp32Timeout += 1
-#         if esp32Timeout == timeout:
-#             print("\nError (ESP32 Communication): Timeout when communicating with the device \n")
-#             sys.exit(1)  # stop program execution if error found
-#         time.sleep(0.5)
-
 def getDevAck(serialPort: serial, comm2send, comm2rec, timeout=40):
-    """
-    Sends a command to the ESP32 and waits for acknowledgment.
-
-    Args:
-        serialPort: The serial port object.
-        comm2send: The command to send (string or convertible to string).
-        comm2rec: The expected acknowledgment byte.
-        timeout: Number of attempts before timing out.
-    """
     if not isinstance(comm2send, str):
         comm2send = str(comm2send)
 
-    esp32Timeout = 0  # Counter for timeout attempts
-
     echo_command = comm2rec.to_bytes(1, "big")
-
-    # print(echo_command)
-
-    # Clear any existing data in the input buffer
     serialPort.reset_input_buffer()
-
-    # Send the expected acknowledgment code to ESP32
     serialPort.write(echo_command)
 
-    while esp32Timeout <= 20:
-        response = enhancedReadSerial(serialPort, 3) # Response is 3 bytes
-        if len(response) == 3 and response == bytearray(b'\x3C' + echo_command + b'\x3E'):
-            # print(response)
+    # Wait for acknowledgment
+    ackTimeout = 0
+    while ackTimeout <= timeout:
+        response = enhancedReadSerial(serialPort, 3)
+        if len(response) == 3 and response == bytearray(b"\x3c" + echo_command + b"\x3e"):
             break
-        else:
-            esp32Timeout += 1
-
-        if esp32Timeout == timeout:
-            print("\nError (ESP32 Communication): Timeout when communicating with the device \n")
-            sys.exit(1)  # stop program execution if error found
+        ackTimeout += 1
         time.sleep(0.5)
 
-    # Send the actual command to ESP32
+    if ackTimeout > timeout:
+        print("\nError (ESP32 Communication): Timeout when communicating with the device \n")
+        sys.exit(1)
+
+    # Send actual command
     serialPort.write(comm2send.encode("utf-8"))
 
-    # Wait for 'O' (OK) response from ESP32
-    while esp32Timeout <= 20:
+    # Wait for 'O' response
+    okTimeout = 0
+    while okTimeout <= timeout:
         if serialPort.in_waiting > 0:
             x = serialPort.read().decode("utf-8")
             if x == "O":
-                esp32Timeout = 0
                 break
             else:
                 print("\nError (ESP32 Communication): Failed to receive 'O' command from the device \n")
-                sys.exit(1)  # stop program execution if error found
-
-        esp32Timeout += 1
-        if esp32Timeout == timeout:
-            print("\nError (ESP32 Communication): Timeout when communicating with the device \n")
-            sys.exit(1)  # stop program execution if error found
+                sys.exit(1)
+        okTimeout += 1
         time.sleep(0.5)
+
+    if okTimeout > timeout:
+        print("\nError (ESP32 Communication): Timeout when communicating with the device \n")
+        sys.exit(1)
+
+
+def waitForESP32(serialPort, expected_msg=None, reply=False, timeout=20, max_attempts=2000):
+    startMarker = ord("<")  # Convert the character to its int value
+    endMarker = ord(">")
+    buf = bytearray()
+
+    # Wait for ESP32 to be ready
+    for _ in range(timeout):
+        if serialPort.in_waiting > 0:
+            break
+        time.sleep(0.5)
+    else:  # The else block in the for-else will only execute if the for loop ends without finding a break
+        raise TimeoutError("Timeout waiting for ESP32 to be ready")
+
+    # Wait for start marker
+    for _ in range(max_attempts):
+        data = serialPort.read()
+        if data and data[0] == startMarker:
+            break
+    else:
+        raise TimeoutError("Timeout waiting for start marker")
+
+    # Read until end marker
+    for _ in range(max_attempts):
+        data = serialPort.read()
+        if data:
+            if data[0] == endMarker:
+                break
+            buf.extend(data)
+    else:
+        raise TimeoutError("Timeout waiting for end marker")
+
+    if expected_msg == buf.decode("utf-8", errors="ignore"):
+        print(f"\nReceived expected message: {expected_msg}")
+    else:
+        print(f"\nError: Received {buf.decode("utf-8",errors='ignore')} and was expecting {expected_msg}")
+        return False
+
+    if reply:
+        serialPort.write("O".encode("utf-8"))
+    return True
+
+
+def sendCommand2ESP32(serialPort: serial, command=None, value=None, timeout=20):
+    strMarker = "<"
+    endMarker = ">"
+
+    if value is None:
+        comm2send = strMarker + str(command) + endMarker
+    else:
+        comm2send = strMarker + str(command) + "," + str(value) + endMarker
+
+    # Send actual command
+    serialPort.write(comm2send.encode("utf-8"))
 
 
 def build_data_headers(headers: dict, custom_metadata: dict = None) -> dict:
@@ -220,24 +202,43 @@ if __name__ == "__main__":
         print("\nError (Serial Communication): Check the communication port \n")
         sys.exit(1)  # Exit the program if the serial connection fails
 
+    msg = "ESP32 Ready"
+    serialPort.reset_input_buffer()
+    # Wait for ESP32 to be ready
+    while not waitForESP32(serialPort, expected_msg=msg, reply=True):
+        pass
+
+    while serialPort.in_waiting > 0:
+        _ = serialPort.read()
+
+    # Set samples to get and wait for ESP32 to be ready
+    msg = str(sampsToGet)
+    while True:
+        sendCommand2ESP32(serialPort, command=1, value=sampsToGet)
+        if waitForESP32(serialPort, expected_msg=msg):
+            break
+
+    # Set CAPDAC and wait for ESP32 to be ready
     # Ensure CAPDAC value is within the valid range [0, 31]
     CAPDAC = max(0, min(31, CAPDAC))
-
-    # # Send CAPDAC configuration to the ESP32
-    getDevAck(serialPort, CAPDAC, 0)
-
-    # Send the number of samples to acquire to the ESP32
-    getDevAck(serialPort, sampsToGet, 1)
+    msg = str(CAPDAC)
+    while True:
+        sendCommand2ESP32(serialPort, command=0, value=CAPDAC)
+        if waitForESP32(serialPort, expected_msg=msg):
+            break
 
     print(f"\n\nStarting data collection in")
-    
-    for ii in range(3,0,-1):
+
+    for ii in range(3, 0, -1):
         print(f"{ii}...")
         time.sleep(1)
     print("now...")
 
-    # Send the start signal to begin data acquisition
-    getDevAck(serialPort, "S", 2)
+    # # Send the start signal to begin data acquisition
+    # getDevAck(serialPort, "S", 2)
+
+    # Set ESP32 in data collection mode
+    sendCommand2ESP32(serialPort, command=2)
 
     # Read the expected number of bytes from the serial port
     serialData = enhancedReadSerial(serialPort, sampsToGet * nBytes_to_receive)
@@ -248,8 +249,6 @@ if __name__ == "__main__":
         if len(serialData) % nBytes_to_receive == 0
         else print(f"Possible data loss. Total data received is: {len(serialData)/nBytes_to_receive}")
     )
-
-
 
     # Split the raw data into timestamp and capacitive sensor byte pairs
     pairs = [(elements[:4], elements[4:]) for elements in [serialData[ii : ii + nBytes_to_receive] for ii in range(0, len(serialData), nBytes_to_receive)]]
@@ -270,6 +269,7 @@ if __name__ == "__main__":
     esp32_timestamp = [x - _esp32_timestamp[0] for x in _esp32_timestamp]
 
     # Close the serial port after data acquisition
+    sendCommand2ESP32(serialPort, command=3)
     serialPort.close()
 
     # ------------------------------------------------------------------------------------------------------------------
