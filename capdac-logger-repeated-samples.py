@@ -187,7 +187,7 @@ if __name__ == "__main__":
     # Set ESP32 in data collection mode
     sendCommand2ESP32(serialPort, command=2)
 
-    serialData = []
+    serialData = bytearray()
 
     start_time = time.time()
     while True:
