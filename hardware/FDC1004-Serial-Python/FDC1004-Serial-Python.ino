@@ -56,6 +56,7 @@ int8_t cmd = -1;
 uint32_t cmd_value = 0;
 boolean newData = false;
 char pcAck = 'F';
+boolean get_nSamples = false;
 
 // Set constants
 int samplesSent = 0;
@@ -162,7 +163,7 @@ void parseData() {      // split the data into its parts
   }
 }
 
-void collectData() {
+void collect_nSamples() {
   timer_start(TIMER_GROUP_0, TIMER_0);
   timeout = samplesToGet * 2 * TIMEOUT_MS; // Wait twice the number of samples to get
   startTime = millis(); // Start timeout timer
@@ -182,6 +183,36 @@ void collectData() {
   }
   resetTimer();
   samplesSent = 0;
+  get_nSamples = false;
+}
+
+void collect_repeatedSamples() {
+  timer_start(TIMER_GROUP_0, TIMER_0);
+  timeout = 15000; // 15 seconds timeout
+  startTime = millis(); // Start timeout timer
+  while (true) {
+    if (millis() - startTime > timeout) {
+      // Send end marker maybe?
+      break;
+    }
+
+    if (timer_interruptFlag) {
+      timer_interruptFlag = false;
+      dataCAP.cap_sens_timestamp = (uint32_t)esp_timer_get_time();
+      dataCAP.cap_sens_data = myFDC1004.getRawCapacitance(measurement, rate);
+      Serial.write((uint8_t*)&dataCAP, sizeof(dataCAP));
+      startTime = millis();
+    }
+
+    if (Serial.available())
+    {
+      byte incoming = Serial.read();
+      if (incoming == 'A') //Abort operation
+        break;
+    }
+  }
+
+  resetTimer();
 }
 
 void sendESP32Rdy() {
@@ -267,10 +298,11 @@ void loop() {
               Serial.print("<");
               Serial.print(samplesToGet);
               Serial.print(">");
+              get_nSamples = true;
               cmd = -1;
               break;
             case 0x02:
-              collectData();
+              currentState = COLLECT_DATA;
               cmd = -1;
               break;
             case 0x03:
@@ -280,5 +312,15 @@ void loop() {
         }
         break;
       }
+    case COLLECT_DATA: {
+        if (get_nSamples) {
+          collect_nSamples();
+        } else {
+          collect_repeatedSamples();
+        }
+        currentState = WAIT_FOR_COMMAND;
+        break;
+      }
+
   }
 }

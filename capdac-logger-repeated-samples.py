@@ -1,0 +1,279 @@
+import pathlib
+import sys
+import time
+
+import pandas as pd
+import serial
+
+from capdac_utils import ShutdownHandler
+
+# --------------------------------------------------------------------------------------------------------------------
+# Constants
+# --------------------------------------------------------------------------------------------------------------------
+# ESP32 variables:
+CAPDAC = 1
+
+# Serial port variables:
+port = "COM3"
+baudRate_serial = 115200  # Measure of data speed
+timeout_serial = 2  # in seconds  # Number of seconds to wait for serial data
+
+DataFileName = "myFile"
+
+# --------------------------------------------------------------------------------------------------------------------
+# Private Constants
+# --------------------------------------------------------------------------------------------------------------------
+_CAP_SENSOR_SAMPLING_RATE = 80  # in Hz (this must match the TIME_INTERVAL variable in the ESP32 code)
+
+
+# --------------------------------------------------------------------------------------------------------------------
+# Functions
+# --------------------------------------------------------------------------------------------------------------------
+def enhancedReadSerial(serialPort: serial, nBytes, timeout=40):
+    """
+    Reads a specified number of bytes from a serial port with a timeout mechanism.
+
+    Args:
+        serialPort: The serial port object.
+        nBytes: Number of bytes to read.
+        timeout: Number of attempts before timing out.
+
+    Returns:
+        A bytearray containing the received data.
+    """
+    buf = bytearray()
+    cont = 0
+
+    while True:
+        # Read available bytes (at least 1, at most nBytes)
+        ii = max(1, min(nBytes, serialPort.in_waiting))
+        data = serialPort.read(ii)
+        if not data:
+            cont += 1
+            if cont == timeout:
+                print("Error: timeout in enhanced read serial")
+                sys.exit(1)
+        else:
+            buf.extend(data)
+
+        if len(buf) >= nBytes:
+            return buf
+
+
+def waitForESP32(serialPort, expected_msg=None, reply=False, timeout=20, max_attempts=2000):
+    startMarker = ord("<")  # Convert the character to its int value
+    endMarker = ord(">")
+    buf = bytearray()
+
+    # Wait for ESP32 to be ready
+    for _ in range(timeout):
+        if serialPort.in_waiting > 0:
+            break
+        time.sleep(0.5)
+    else:  # The else block in the for-else will only execute if the for loop ends without finding a break
+        raise TimeoutError("Timeout waiting for ESP32 to be ready")
+
+    # Wait for start marker
+    for _ in range(max_attempts):
+        data = serialPort.read()
+        if data and data[0] == startMarker:
+            break
+    else:
+        raise TimeoutError("Timeout waiting for start marker")
+
+    # Read until end marker
+    for _ in range(max_attempts):
+        data = serialPort.read()
+        if data:
+            if data[0] == endMarker:
+                break
+            buf.extend(data)
+    else:
+        raise TimeoutError("Timeout waiting for end marker")
+
+    if expected_msg == buf.decode("utf-8", errors="ignore"):
+        print(f"\nReceived expected message: {expected_msg}")
+    else:
+        print(f"\nError: Received {buf.decode("utf-8",errors='ignore')} and was expecting {expected_msg}")
+        return False
+
+    if reply:
+        serialPort.write("O".encode("utf-8"))
+    return True
+
+
+def sendCommand2ESP32(serialPort: serial, command=None, value=None, timeout=20):
+    strMarker = "<"
+    endMarker = ">"
+
+    if value is None:
+        comm2send = strMarker + str(command) + endMarker
+    else:
+        comm2send = strMarker + str(command) + "," + str(value) + endMarker
+
+    # Send actual command
+    serialPort.write(comm2send.encode("utf-8"))
+
+
+def build_data_headers(headers: dict, custom_metadata: dict = None) -> dict:
+    """
+    Builds a forceHeaders dictionary by combining metadata and headers.
+
+    Parameters:
+    - headers (dict): A dictionary where keys are column letters and values are header names.
+    - custom_metadata (dict): Optional. A dictionary with specific metadata lists for certain columns.
+
+    Returns:
+    - dict: A dictionary where each key maps to a list of metadata + header.
+    """
+    if custom_metadata is None:
+        custom_metadata = {}
+
+    header_spacing = 1  # spacing between metadata and headers
+
+    # Determine the maximum metadata length
+    max_meta_len = max([len(v) for v in custom_metadata.values()], default=0) + header_spacing
+
+    # Pad default metadata
+    padded_default_metadata = [None] * (max_meta_len)
+
+    # Pad all custom metadata entries
+    padded_custom_metadata = {col: meta + [None] * (max_meta_len - len(meta)) for col, meta in custom_metadata.items()}
+
+    # Build the final dictionary
+    return {col: padded_custom_metadata.get(col, padded_default_metadata) + [header] for col, header in headers.items()}
+
+
+if __name__ == "__main__":
+    # Each sample from the ESP32 consists of 8 bytes:
+    # 4 bytes for timestamp and 4 bytes for capacitive sensor data
+    nBytes_to_receive = 8
+
+    shutdown_handler = ShutdownHandler()
+
+    # Initialize serial communication with the ESP32
+    try:
+        # If a port is specified, the serial connection opens automatically
+        serialPort = serial.Serial(port, baudrate=baudRate_serial, timeout=timeout_serial)
+    except serial.SerialException:
+        print("\nError (Serial Communication): Check the communication port \n")
+        sys.exit(1)  # Exit the program if the serial connection fails
+
+    msg = "ESP32 Ready"
+    serialPort.reset_input_buffer()
+    # Wait for ESP32 to be ready
+    while not waitForESP32(serialPort, expected_msg=msg, reply=True):
+        pass
+
+    while serialPort.in_waiting > 0:
+        _ = serialPort.read()
+
+    # Set CAPDAC and wait for ESP32 to be ready
+    # Ensure CAPDAC value is within the valid range [0, 31]
+    CAPDAC = max(0, min(31, CAPDAC))
+    msg = str(CAPDAC)
+    while True:
+        sendCommand2ESP32(serialPort, command=0, value=CAPDAC)
+        if waitForESP32(serialPort, expected_msg=msg):
+            break
+
+    print(f"\n\nStarting data collection in")
+
+    for ii in range(3, 0, -1):
+        print(f"{ii}...")
+        time.sleep(1)
+    print("now...")
+
+    # Set ESP32 in data collection mode
+    sendCommand2ESP32(serialPort, command=2)
+
+    serialData = []
+
+    start_time = time.time()
+    while True:
+        if shutdown_handler.check_shutdown():
+            serialPort.write("A".encode("utf-8"))
+            break
+
+        # Read the expected number of bytes from the serial port
+        serialData.append(enhancedReadSerial(serialPort, nBytes_to_receive))
+
+    end_time = time.time()
+    # Verify that the received data size matches the expected number of samples
+    (
+        print(f"Total data received is: {len(serialData)//nBytes_to_receive}")
+        if len(serialData) % nBytes_to_receive == 0
+        else print(f"Possible data loss. Total data received is: {len(serialData)/nBytes_to_receive}")
+    )
+
+    # Split the raw data into timestamp and capacitive sensor byte pairs
+    pairs = [(elements[:4], elements[4:]) for elements in [serialData[ii : ii + nBytes_to_receive] for ii in range(0, len(serialData), nBytes_to_receive)]]
+
+    esp32_timestamp_bytes = []
+    cap_sensor_bytes = []
+
+    for x, y in pairs:
+        esp32_timestamp_bytes.append(x)
+        cap_sensor_bytes.append(y)
+
+    # Convert capacitive sensor bytes to capacitance values (in pF)
+    # Formula from FDC1004 datasheet (page 16), using little-endian byte order as that is the format from the ESP32
+    capData = [round(((int.from_bytes(bytes_data, byteorder="little", signed=True) / 524288.0) + (CAPDAC * 3.125)), 4) for bytes_data in cap_sensor_bytes]
+
+    # Convert timestamp bytes to relative time (in microseconds)
+    _esp32_timestamp = [int.from_bytes(bytes_data, byteorder="little") for bytes_data in esp32_timestamp_bytes]
+    esp32_timestamp = [x - _esp32_timestamp[0] for x in _esp32_timestamp]
+
+    # Close the serial port after data acquisition
+    sendCommand2ESP32(serialPort, command=3)
+    serialPort.close()
+
+    # ------------------------------------------------------------------------------------------------------------------
+    print(f"\nSaving data, please wait...")
+
+    # Create the output folder if it doesn't exist
+    dataFolderNamePath = pathlib.Path(__file__).parent.joinpath("Capacitance Data")
+    if not dataFolderNamePath.is_dir():
+        dataFolderNamePath.mkdir()
+
+    # Generate sample numbers for each data point
+    cap_data_num_samples = list(range(1, len(esp32_timestamp) + 1))
+
+    # Define column headers for the CSV file
+    _dataHeaders = {
+        "A": "Sample No.",
+        "B": "Timestamp (us)",
+        "C": "Capacitance (pF)",
+    }
+
+    # Define metadata to include at the top of the CSV file
+    dataMetadata = {
+        "A": ["Data Collection Duration (s):", "Capacitive Sensor Sample rate (Hz):"],
+        "B": [end_time - start_time, _CAP_SENSOR_SAMPLING_RATE],
+    }
+
+    # Organize the main data content
+    dataBody = {
+        "A": cap_data_num_samples,
+        "B": esp32_timestamp,
+        "C": capData,
+    }
+
+    # Build the full header section with metadata
+    dataHeaders = build_data_headers(_dataHeaders, dataMetadata)
+
+    # Create DataFrames for headers and data
+    header_df = pd.DataFrame(dataHeaders)
+    dataBody_df = pd.DataFrame(dataBody)
+
+    # Combine header and data into a single DataFrame
+    capacitanceData_df = pd.concat([header_df, dataBody_df], ignore_index=True)
+
+    # Save the DataFrame to a CSV file
+    capacitanceData_df.to_csv(
+        dataFolderNamePath.joinpath(DataFileName + ".csv"),
+        index=False,
+        header=False,
+    )
+
+    print(f"\nDone saving data")
